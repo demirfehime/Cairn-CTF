@@ -1,0 +1,18 @@
+# Cairn CTF runs as a standalone Server + Dispatcher. Keep the project MCP route
+# disabled by default. If explicitly enabled, it remains isolated from the
+# pentest instance by name, repository path, database, config, and port.
+[mcp_servers.cairn-ctf]
+enabled = false
+command = "E:/program/自动化渗透测试/Cairn-20260719-afternoon/.venv/Scripts/python.exe"
+args = [
+  "-m",
+  "cairn.codex_mcp",
+  "--config",
+  "E:/program/自动化渗透测试/Cairn-20260719-afternoon/dispatch.codex.yaml",
+  "--db-path",
+  "E:/program/自动化渗透测试/Cairn-20260719-afternoon/data/cairn.db",
+  "--port",
+  "8792",
+]
+startup_timeout_sec = 45
+tool_timeout_sec = 1800

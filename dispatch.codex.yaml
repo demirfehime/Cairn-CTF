@@ -1,0 +1,30 @@
+# Codex-first local deployment. No Docker daemon or worker image is required.
+server: "http://127.0.0.1:8791"
+
+runtime:
+  execution: local
+  dynamic_agents: true
+  worker_healthcheck: disabled
+  interval: 2
+  max_workers: 8
+  max_running_projects: 2
+  max_project_workers: 8
+  healthcheck_timeout: 15
+  prompt_group: default
+
+tasks:
+  bootstrap:
+    timeout: 300
+    conclude_timeout: 90
+  reason:
+    timeout: 300
+    max_intents: 8
+  explore:
+    timeout: 300
+    conclude_timeout: 90
+
+local:
+  workspace_root: "./runs"
+  completed_action: keep
+
+workers: []
