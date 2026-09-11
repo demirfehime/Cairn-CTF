@@ -51,6 +51,7 @@ def test_create_project_translates_plain_hints(monkeypatch) -> None:
         "origin": "origin",
         "goal": "goal",
         "bootstrap_enabled": False,
+        "attachment_ids": [],
         "hints": [
             {"content": "first", "creator": "codex"},
             {"content": "second", "creator": "codex"},

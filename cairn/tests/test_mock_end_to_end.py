@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 import json
 import os
+import sys
 import subprocess
 import threading
 from typing import Any
@@ -70,10 +71,10 @@ class InProcessClient:
             {"worker": worker, "description": description},
         )
 
-    def complete(self, project_id: str, from_ids: list[str], description: str, worker: str) -> ApiResult:
+    def complete(self, project_id: str, from_ids: list[str], description: str, worker: str, evidence=None) -> ApiResult:
         return self._post(
             f"/projects/{project_id}/complete",
-            {"from": from_ids, "description": description, "worker": worker},
+            {"from": from_ids, "description": description, "worker": worker, "evidence": evidence},
         )
 
     def create_intent(self, project_id: str, from_ids: list[str], description: str, creator: str) -> ApiResult:
@@ -90,7 +91,7 @@ class InProcessClient:
 
 class LocalProcess:
     def __init__(self, command: list[str], env: dict[str, str]):
-        self.command = command
+        self.command = [sys.executable if command[0] == "python3" else command[0], *command[1:]]
         self.env = env
         self._process: subprocess.Popen[str] | None = None
         self._cancel_reason: str | None = None

@@ -42,7 +42,7 @@ tasks:
 
 container:
   # Base worker container. The dispatcher execs agent commands inside one container per project.
-  image: "ghcr.io/oritera/cairn-worker-container:latest"
+  image: "ghcr.io/demirfehime/cairn-ctf-worker-container:latest"
   network_mode: "host"
   # "stop" keeps finished containers for inspection; "remove" is cleaner but loses post-run state.
   completed_action: "stop"

@@ -1,9 +1,9 @@
 # Codex-first local deployment. No Docker daemon or worker image is required.
-server: "http://127.0.0.1:8791"
+server: "http://127.0.0.1:8792"
 
 runtime:
   execution: local
-  dynamic_agents: true
+  server_managed_agents: true
   worker_healthcheck: disabled
   interval: 2
   max_workers: 8

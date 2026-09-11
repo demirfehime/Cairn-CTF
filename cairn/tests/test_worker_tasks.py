@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
+import pytest
+
 from cairn.dispatcher.protocol.client import ApiResult
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.runtime.process import ProcessResult
 from cairn.dispatcher.workers.health import HealthResult
 from cairn.dispatcher.tasks import bootstrap, explore, reason
-from cairn.dispatcher.tasks.common import decorate_worker_prompt, task_healthcheck_enabled
+from cairn.dispatcher.tasks.common import task_healthcheck_enabled, write_graph_snapshot_reference
 
 from conftest import (
     FakeClient,
@@ -24,51 +26,29 @@ def _lease_factory(lease: FakeLease):
     return lambda *_args, **_kwargs: lease
 
 
-def test_penetration_prompt_names_target_and_shared_blackboard() -> None:
+def test_graph_snapshot_reference_preserves_target_and_goal(tmp_path) -> None:
+    containers = FakeContainerManager()
+    graph = "origin: http://127.0.0.1:3000\ngoal: finish\n"
+    reference = write_graph_snapshot_reference(
+        containers, str(tmp_path), graph, phase="reason_execute"
+    )
+    assert len(containers.writes) == 1
+    workspace, path, content = containers.writes[0]
+    assert workspace == str(tmp_path)
+    assert content == graph
+    assert path in reference
+    assert "read the entire file" in reference
+
+
+@pytest.mark.parametrize("server_managed_agents", [False, True])
+@pytest.mark.parametrize("mode, expected", [
+    ("disabled", False), ("startup_only", False), ("startup_and_task", True),
+])
+def test_task_healthcheck_respects_configured_mode(server_managed_agents, mode, expected) -> None:
     config = make_config()
-    worker = config.workers[0].model_copy(
-        update={
-            "type": "codex",
-            "env": {"CAIRN_USE_PENETRATION_PROMPT": "true"},
-        }
-    )
-    project = make_project()
-    project.project.target_url = "http://127.0.0.1:3000"
-
-    prompt = decorate_worker_prompt(
-        "TASK",
-        worker,
-        project,
-        "C:/runs/proj_001/.cairn/shared/project-state.yaml",
-    )
-
-    assert prompt.startswith("Safety and authorization context")
-    assert "http://127.0.0.1:3000" in prompt
-    assert "finish" in prompt
-    assert "explicitly authorized defensive security assessment" in prompt
-    assert "Do not contact unrelated hosts" in prompt
-    assert "safe in-scope alternative" in prompt
-    assert "TASK" in prompt
-    assert ".cairn/shared/project-state.yaml" in prompt
-    assert "do not repeat work already confirmed" in prompt
-
-
-def test_dynamic_local_api_agent_always_runs_model_healthcheck() -> None:
-    config = make_config()
-    config.runtime.dynamic_agents = True
-    config.runtime.worker_healthcheck = "disabled"
-    worker = config.workers[0].model_copy(
-        update={
-            "name": "agent_001",
-            "env": {
-                "CODEX_BASE_URL": "https://example.test/v1",
-                "OPENAI_API_KEY": "saved-key",
-                "CODEX_MODEL": "model-a",
-            },
-        }
-    )
-
-    assert task_healthcheck_enabled(config, worker)
+    config.runtime.server_managed_agents = server_managed_agents
+    config.runtime.worker_healthcheck = mode
+    assert task_healthcheck_enabled(config) is expected
 
 
 def test_reason_writes_graph_snapshot_and_creates_intent(monkeypatch) -> None:
@@ -106,12 +86,8 @@ def test_reason_writes_graph_snapshot_and_creates_intent(monkeypatch) -> None:
     assert client.created_intents == [("proj_001", ["f001"], "next step", "test-worker")]
     assert client.released_reasons == [("proj_001", "test-worker")]
     assert lease.started and lease.stopped
-    assert len(containers.writes) == 2
-    shared_container, shared_path, shared_content = containers.writes[0]
-    assert shared_container == "container-proj_001"
-    assert "/shared-state-" in shared_path
-    assert shared_content == graph_yaml + "\n"
-    container_name, path, content = containers.writes[1]
+    assert len(containers.writes) == 1
+    container_name, path, content = containers.writes[0]
     assert container_name == "container-proj_001"
     assert path.startswith("/tmp/cairn-prompts/reason_execute-")
     assert path.endswith("/graph.yaml")
@@ -152,11 +128,12 @@ def test_explore_early_plain_text_exit_uses_conclude_fallback(monkeypatch) -> No
 
     assert outcome == "success"
     assert client.concluded == [("proj_001", "i001", "test-worker", "confirmed fact")]
-    assert len(containers.writes) == 4
-    assert "/shared-state-" in containers.writes[0][1]
-    assert "/explore_execute-" in containers.writes[1][1]
-    assert "/shared-state-" in containers.writes[2][1]
-    assert "/explore_conclude-" in containers.writes[3][1]
+    assert len(containers.writes) == 2
+    assert "/explore_execute-" in containers.writes[0][1]
+    assert "/explore_conclude-" in containers.writes[1][1]
+    assert containers.writes[0][1] != containers.writes[1][1]
+    assert containers.writes[0][2] == "facts:\n- id: f001"
+    assert containers.writes[1][2] == "facts:\n- id: f001"
     assert len(driver.execute_prompts) == 1
     assert len(driver.conclude_prompts) == 1
     assert lease.started and lease.stopped

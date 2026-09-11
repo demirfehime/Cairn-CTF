@@ -2,15 +2,15 @@ from __future__ import annotations
 
 from concurrent.futures import Future
 
+import pytest
+
 from cairn.dispatcher.models import ReasonCheckpoint, RunningTask
-from cairn.dispatcher.baseline import BASELINE_TASKS, missing_baseline_tasks
+from cairn.dispatcher.baseline import missing_baseline_tasks
 from cairn.dispatcher.protocol.client import ApiResult
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
-from cairn.dispatcher.runtime.local_backend import LocalBackend
-from cairn.dispatcher.config import LocalConfig
 from cairn.dispatcher.scheduler.loop import DispatcherLoop
 from cairn.dispatcher.scheduler.worker_select import choose_worker
-from cairn.server.models import Fact, ProjectSummary, RuntimeAgentProfile
+from cairn.server.models import Fact, ProjectSummary, AgentRuntime
 
 from conftest import make_config, make_intent, make_project
 
@@ -115,24 +115,6 @@ def test_reap_cleanup_future_records_only_successful_inactive_cleanup() -> None:
     assert loop.cleanup_futures == {}
     assert loop._cleanup_pending == set()
     assert loop._inactive_cleanup_done == {"proj-success": "completed"}
-
-
-def test_active_blackboard_refresh_uses_configured_interval(monkeypatch) -> None:
-    loop = _loop()
-    loop.runtime_project_ids = {"active"}
-    loop.blackboard_refresh_interval = 2
-    refreshed: list[str] = []
-    loop._refresh_project_shared_state = lambda project_id: refreshed.append(project_id)
-    now = iter([10.0, 11.0, 12.1])
-    monkeypatch.setattr("cairn.dispatcher.scheduler.loop.time.monotonic", lambda: next(now))
-    summaries = [_summary("active", "active")]
-
-    loop._refresh_active_project_shared_states(summaries)
-    loop._last_blackboard_refresh["active"] = 10.0
-    loop._refresh_active_project_shared_states(summaries)
-    loop._refresh_active_project_shared_states(summaries)
-
-    assert refreshed == ["active", "active"]
 
 
 def test_choose_worker_prefers_priority_then_lower_running_count() -> None:
@@ -317,7 +299,7 @@ def test_select_worker_reports_busy_unhealthy_rejected_and_unsupported_workers(m
 
     project = make_project()
     project.project.id = "proj"
-    selection = loop._select_worker(project, "reason")
+    selection = loop._select_worker(project.project.id, "reason")
 
     assert selection.worker is None
     assert selection.blocked_busy == ["busy(1/1)"]
@@ -362,162 +344,6 @@ def test_startup_only_worker_healthcheck_runs_automatic_startup_check() -> None:
     assert calls == [False]
 
 
-def test_dynamic_agents_refresh_into_dedicated_api_workers() -> None:
-    loop = _loop()
-    base = make_config()
-    loop.config = base.model_copy(
-        update={
-            "runtime": base.runtime.model_copy(update={"dynamic_agents": True}),
-            "workers": [],
-        }
-    )
-    loop.client = type(
-        "Client",
-        (),
-        {
-            "list_runtime_agents": lambda _self: [
-                RuntimeAgentProfile(
-                    id="agent_001",
-                    name="Recon",
-                    api_base_url="http://127.0.0.1:9001/v1",
-                    api_key="key-one",
-                    model="model-a",
-                    use_penetration_prompt=True,
-                    enabled=True,
-                    max_running=2,
-                    priority=3,
-                    has_api_key=True,
-                )
-            ]
-        },
-    )()
-    loop.dynamic_workers = []
-
-    loop._refresh_dynamic_workers()
-
-    worker = loop.dynamic_workers[0]
-    assert worker.name == "agent_001"
-    assert worker.type == "codex"
-    assert worker.max_running == 2
-    assert worker.env["CODEX_BASE_URL"] == "http://127.0.0.1:9001/v1"
-    assert worker.env["OPENAI_API_KEY"] == "key-one"
-    assert worker.env["CODEX_MODEL"] == "model-a"
-    assert worker.env["CAIRN_USE_PENETRATION_PROMPT"] == "true"
-
-
-def test_multi_agent_selection_filters_project_scope_and_spreads_load() -> None:
-    loop = _loop()
-    base = make_config()
-    first = base.workers[0].model_copy(
-        update={"name": "agent_001", "max_running": 3, "priority": 0}
-    )
-    second = base.workers[0].model_copy(
-        update={"name": "agent_002", "max_running": 3, "priority": 10}
-    )
-    excluded = base.workers[0].model_copy(
-        update={"name": "agent_003", "max_running": 3, "priority": 0}
-    )
-    loop.config = base.model_copy(
-        update={"runtime": base.runtime.model_copy(update={"dynamic_agents": True}), "workers": []}
-    )
-    loop.dynamic_workers = [first, second, excluded]
-    loop.futures = {
-        Future(): RunningTask("proj_001", "explore", "agent_001", TaskCancellation())
-    }
-    project = make_project()
-    project.project.agent_ids = ["agent_001", "agent_002"]
-    project.project.target_url = "http://127.0.0.1:3000/path"
-
-    selection = loop._select_worker(project, "explore")
-
-    assert selection.worker is not None
-    assert selection.worker.name == "agent_002"
-    assert selection.worker.env["CAIRN_CODEX_NETWORK_ALLOW"] == "127.0.0.1"
-    assert selection.worker.env["CAIRN_PROJECT_TARGET_URL"] == project.project.target_url
-
-
-def test_dynamic_agent_weight_rewards_progress_and_penalizes_failure() -> None:
-    loop = _loop()
-    base = make_config()
-    loop.config = base.model_copy(
-        update={"runtime": base.runtime.model_copy(update={"dynamic_agents": True}), "workers": []}
-    )
-    task = RunningTask("proj_001", "reason", "agent_001", TaskCancellation())
-
-    loop._record_agent_outcome(task, "success")
-    loop._record_agent_outcome(task, "success")
-    assert loop._agent_weight("proj_001", "agent_001") == 3
-    assert loop.agent_performance[("proj_001", "agent_001")].progress_streak == 2
-
-    loop._record_agent_outcome(task, "failed")
-    assert loop._agent_weight("proj_001", "agent_001") == 2
-    assert loop.agent_performance[("proj_001", "agent_001")].progress_streak == 0
-    assert loop.agent_performance[("proj_001", "agent_001")].failure_streak == 1
-
-
-def test_dynamic_agent_selection_rotates_away_from_failed_agent() -> None:
-    loop = _loop()
-    base = make_config()
-    preferred = base.workers[0].model_copy(update={"name": "agent_001", "priority": 0})
-    fallback = base.workers[0].model_copy(update={"name": "agent_002", "priority": 100})
-    loop.config = base.model_copy(
-        update={"runtime": base.runtime.model_copy(update={"dynamic_agents": True}), "workers": []}
-    )
-    loop.dynamic_workers = [preferred, fallback]
-    loop.futures = {}
-    project = make_project()
-    project.project.agent_ids = ["agent_001", "agent_002"]
-
-    assert loop._select_worker(project, "reason").worker.name == "agent_001"
-    loop._record_agent_outcome(
-        RunningTask(project.project.id, "reason", "agent_001", TaskCancellation()),
-        "failed",
-    )
-    assert loop._select_worker(project, "reason").worker.name == "agent_002"
-
-
-def test_no_progress_resets_streak_without_changing_dynamic_weight() -> None:
-    loop = _loop()
-    base = make_config()
-    loop.config = base.model_copy(
-        update={"runtime": base.runtime.model_copy(update={"dynamic_agents": True}), "workers": []}
-    )
-    task = RunningTask("proj_001", "reason", "agent_001", TaskCancellation())
-    loop._record_agent_outcome(task, "success")
-    loop._record_agent_outcome(task, "no_progress")
-
-    assert loop._agent_weight("proj_001", "agent_001") == 1
-    performance = loop.agent_performance[("proj_001", "agent_001")]
-    assert performance.progress_streak == 0
-    assert performance.failure_streak == 0
-
-
-def test_reap_no_progress_updates_reason_checkpoint_without_rewarding_agent() -> None:
-    loop = _loop()
-    base = make_config()
-    loop.config = base.model_copy(
-        update={"runtime": base.runtime.model_copy(update={"dynamic_agents": True}), "workers": []}
-    )
-    future: Future[str] = Future()
-    future.set_result("no_progress")
-    loop.futures = {
-        future: RunningTask(
-            "proj_001",
-            "reason",
-            "agent_001",
-            TaskCancellation(),
-            fact_count=3,
-            hint_count=2,
-            open_intent_count=0,
-        )
-    }
-
-    loop._reap_futures()
-
-    assert loop.reason_checkpoints["proj_001"] == ReasonCheckpoint(3, 2, 0)
-    assert loop._agent_weight("proj_001", "agent_001") == 0
-
-
 def test_baseline_coverage_keeps_weak_credentials_when_auth_intent_does_not_test_them() -> None:
     auth = make_intent("i001")
     auth.worker = None
@@ -534,164 +360,86 @@ def test_baseline_coverage_keeps_weak_credentials_when_auth_intent_does_not_test
     assert "ssrf" not in missing
 
 
-def test_dynamic_project_creates_only_missing_baseline_intents() -> None:
-    loop = _loop()
-    base = make_config()
-    loop.config = base.model_copy(
-        update={"runtime": base.runtime.model_copy(update={"dynamic_agents": True}), "workers": []}
-    )
-    project = make_project(intents=[])
-    project.project.target_url = "http://127.0.0.1:3000"
-    project.project.agent_ids = ["agent_001", "agent_002"]
-    existing = make_intent("i001")
-    existing.worker = None
-    existing.description = "Safely verify the suspected SSRF path."
-    project.intents = [existing]
-    calls: list[tuple[str, str]] = []
-
-    def create_intent(_project_id, _from_ids, description, creator):
-        calls.append((creator, description))
-        intent_id = f"i{len(calls) + 1:03d}"
-        return ApiResult(
-            201,
-            {
-                "id": intent_id,
-                "from": ["origin"],
-                "to": None,
-                "description": description,
-                "creator": creator,
-                "worker": None,
-                "last_heartbeat_at": None,
-                "created_at": f"2026-01-01T00:00:{len(calls) + 2:02d}Z",
-                "concluded_at": None,
-            },
-        )
-
-    loop.client = type("Client", (), {"create_intent": staticmethod(create_intent)})()
-
-    created = loop._ensure_baseline_intents(project)
-
-    expected = len(BASELINE_TASKS) - 1
-    assert created == expected
-    assert len(calls) == expected
-    assert all(creator != "dispatcher.baseline.ssrf" for creator, _description in calls)
-    assert any(creator == "dispatcher.baseline.weak_credentials" for creator, _description in calls)
-
-
-def test_unattempted_intent_is_selected_before_failed_intent() -> None:
-    loop = _loop()
-    failed = make_intent("i001")
-    failed.worker = None
-    failed.created_at = "2026-01-01T00:00:01Z"
-    fresh = make_intent("i002")
-    fresh.worker = None
-    fresh.created_at = "2026-01-01T00:00:02Z"
-    loop.intent_failure_counts[("proj_001", "i001")] = 2
-
-    selected = loop._select_unclaimed_intent("proj_001", [failed, fresh])
-
-    assert selected is not None
-    assert selected.id == "i002"
-
-
-def test_failed_intent_uses_exponential_cooldown(monkeypatch) -> None:
-    loop = _loop()
-    loop.config = make_config()
-    monkeypatch.setattr("cairn.dispatcher.scheduler.loop.time.time", lambda: 100.0)
-    task = RunningTask(
-        "proj_001",
-        "explore",
-        "agent_001",
-        TaskCancellation(),
-        intent_id="i001",
-    )
-
-    loop._record_intent_outcome(task, "failed")
-    assert loop.intent_failure_counts[("proj_001", "i001")] == 1
-    assert loop.intent_retry_until[("proj_001", "i001")] == 105.0
-
-    loop._record_intent_outcome(task, "failed")
-    assert loop.intent_failure_counts[("proj_001", "i001")] == 2
-    assert loop.intent_retry_until[("proj_001", "i001")] == 110.0
-
-    intent = make_intent("i001")
-    intent.worker = None
-    assert loop._select_unclaimed_intent("proj_001", [intent]) is None
-
-
-def test_multi_agent_initial_project_skips_single_bootstrap_and_expands_reason_paths() -> None:
-    loop = _loop()
-    base = make_config()
-    worker = base.workers[0].model_copy(update={"name": "agent_001"})
-    loop.config = base.model_copy(
-        update={"runtime": base.runtime.model_copy(update={"dynamic_agents": True}), "workers": []}
-    )
-    loop.dynamic_workers = [worker]
-    loop.futures = {}
-    loop.container_manager = object()
-    loop.executor = type(
-        "Executor",
-        (),
-        {
-            "submit": lambda _self, fn, *args: _completed_future(
-                loop, fn, args
-            )
-        },
-    )()
-    loop.client = type(
-        "Client",
-        (),
-        {"claim_reason": lambda _self, *_args: ApiResult(200, {})},
-    )()
-    project = make_project()
-    project.facts = project.facts[:2]
-    project.project.agent_ids = ["agent_001", "agent_002", "agent_003", "agent_004"]
-
-    assert not loop._project_requires_bootstrap(project)
-    assert loop._dispatch_reason(project, "graph", "initial")
-    submitted_config = loop._submitted_args[0]
-    assert submitted_config.tasks.reason.max_intents == 4
-    assert base.tasks.reason.max_intents == 3
-
-
-def test_multi_agent_project_ignores_legacy_bootstrap_intent() -> None:
-    loop = _loop()
-    base = make_config()
-    loop.config = base.model_copy(
-        update={"runtime": base.runtime.model_copy(update={"dynamic_agents": True})}
-    )
-    project = make_project(intents=[make_intent()])
-    project.project.agent_ids = ["agent_001", "agent_002"]
-    project.intents[0].description = "bootstrap"
-    project.intents[0].creator = "dispatcher.bootstrap"
-    project.intents[0].from_ = ["origin"]
-
-    assert not loop._project_requires_bootstrap(project)
-
-
-def test_successful_task_refreshes_stable_shared_project_state(tmp_path) -> None:
-    loop = _loop()
-    project = make_project()
-    project.project.target_url = "http://127.0.0.1:3000"
-    project.project.agent_ids = ["agent_001"]
-    loop.client = type(
-        "Client",
-        (),
-        {
-            "get_project": lambda _self, _project_id: project,
-            "export_project": lambda _self, _project_id: "project:\n  title: test\n",
-        },
-    )()
-    loop.container_manager = LocalBackend(LocalConfig(workspace_root=str(tmp_path)))
-
-    loop._refresh_project_shared_state("proj_001")
-
-    shared = tmp_path / "proj_001" / ".cairn" / "shared" / "project-state.yaml"
-    assert shared.read_text(encoding="utf-8") == "project:\n  title: test\n"
-
-
 def _completed_future(loop: DispatcherLoop, _fn, args) -> Future[str]:
     loop._submitted_args = args
     future: Future[str] = Future()
     future.set_result("success")
     return future
+
+
+# Current CTF architecture uses server-managed project assignments and fixed
+# unhealthy/rejected cooldowns, not the former dynamic scoring/shared-file API.
+def test_server_agents_refresh_preserves_identity_and_credentials():
+    loop = _loop()
+    loop.config = make_config()
+    loop.scope_project_id = None
+    loop.scope_kind = None
+    agent = AgentRuntime(id="agent_001", name="Recon", base_url="http://localhost:9001/v1",
+        api_key="key-one", model="model-a", enabled=True, task_types=["reason"],
+        max_running=2, priority=3, created_at="2026-01-01", updated_at="2026-01-01")
+    loop.client = type("Client", (), {"list_runtime_agents": lambda self: [agent]})()
+    loop._refresh_server_agents()
+    worker = loop.config.workers[0]
+    assert worker.agent_id == agent.id
+    assert worker.name == "Recon"
+    assert worker.max_running == 2
+    assert worker.env["OPENAI_API_KEY"] == "key-one"
+    assert worker.env["CODEX_MODEL"] == "model-a"
+
+
+def test_server_managed_selection_filters_project_and_busy_assignments():
+    loop = _loop()
+    loop.config = make_config()
+    loop.config.runtime.server_managed_agents = True
+    base = loop.config.workers[0]
+    loop.config.workers = [base.model_copy(update={"name": name, "agent_id": name, "max_running": 3})
+                           for name in ["agent_001", "agent_002", "agent_003"]]
+    loop.project_agent_ids = {"proj_001": {"agent_001", "agent_002"}}
+    loop.futures = {Future(): RunningTask("proj_001", "explore", "agent_001", TaskCancellation())}
+    selection = loop._select_worker("proj_001", "explore")
+    assert selection.worker.name == "agent_002"
+    assert "agent_003(not selected)" in selection.blocked_task_type
+    assert selection.blocked_busy
+    assert loop._select_worker("other_project", "explore").worker is None
+
+
+@pytest.mark.parametrize("outcome, cooldown", [("unhealthy", 30), ("rejected", 5)])
+def test_failed_worker_cools_down_and_allows_fallback(monkeypatch, outcome, cooldown):
+    loop = _loop()
+    loop.config = make_config()
+    base = loop.config.workers[0]
+    loop.config.workers = [base.model_copy(update={"name": "first", "priority": 0}),
+                           base.model_copy(update={"name": "fallback", "priority": 10})]
+    monkeypatch.setattr("cairn.dispatcher.scheduler.loop.time.time", lambda: 100.0)
+    future = Future()
+    future.set_result(outcome)
+    loop.futures = {future: RunningTask("proj_001", "explore", "first", TaskCancellation())}
+    loop._reap_futures()
+    assert loop._select_worker("proj_001", "explore").worker.name == "fallback"
+    monkeypatch.setattr("cairn.dispatcher.scheduler.loop.time.time", lambda: 101.0 + cooldown)
+    assert loop._select_worker("proj_001", "explore").worker.name == "first"
+
+
+@pytest.mark.parametrize("outcome, checkpoint", [("success", True), ("failed", False), ("cancelled", False)])
+def test_reason_checkpoint_only_advances_after_success(outcome, checkpoint):
+    loop = _loop()
+    future = Future()
+    future.set_result(outcome)
+    loop.futures = {future: RunningTask("proj_001", "reason", "worker", TaskCancellation(),
+        fact_count=3, hint_count=2, open_intent_count=0)}
+    loop._reap_futures()
+    assert ("proj_001" in loop.reason_checkpoints) is checkpoint
+    if checkpoint:
+        assert loop.reason_checkpoints["proj_001"] == ReasonCheckpoint(3, 2, 0)
+
+
+def test_parent_delegates_bootstrap_to_children():
+    from cairn.server.models import ProjectAgentSelection
+    loop = _loop()
+    loop.config = make_config()
+    parent = make_project()
+    parent.project.kind = "parent"
+    parent.project.parent_agent = ProjectAgentSelection(agent_id="parent-agent", name="Parent", model="mock")
+    assert not loop._project_requires_bootstrap(parent)
+    child = make_project()
+    assert loop._project_requires_bootstrap(child)

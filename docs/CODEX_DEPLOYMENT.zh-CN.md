@@ -9,7 +9,7 @@ Codex
   │ stdio MCP
   ▼
 Cairn MCP Runtime（单个本机 Python 进程）
-  ├─ FastAPI / Web UI     http://127.0.0.1:8791
+  ├─ FastAPI / Web UI     http://127.0.0.1:8792
   ├─ SQLite               data/cairn.db
   └─ Dispatcher
        └─ codex exec      runs/<project_id>/

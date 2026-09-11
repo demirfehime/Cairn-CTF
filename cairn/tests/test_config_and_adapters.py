@@ -133,3 +133,19 @@ def test_codex_driver_execute_argv_passes_model_endpoint_and_prompt() -> None:
     assert "gpt-test" in argv
     assert 'model_providers.cairn.base_url="http://api/v1"' in argv
     assert argv[-2:] == ["--", "prompt"]
+
+
+@pytest.mark.parametrize("group", ["default", "mock"])
+def test_missing_parent_prompt_fails_configuration_validation(tmp_path, monkeypatch, group):
+    from cairn.dispatcher import config as config_module
+    from importlib import resources
+    prompt_root = resources.files("cairn.dispatcher.prompts")
+    destination = tmp_path / "prompts" / group
+    destination.mkdir(parents=True)
+    for resource in prompt_root.joinpath(group).iterdir():
+        if resource.is_file():
+            (destination / resource.name).write_bytes(resource.read_bytes())
+    (tmp_path / "prompts" / group / "parent_reason.md").unlink()
+    monkeypatch.setattr(config_module.resources, "files", lambda package: tmp_path / "prompts")
+    with pytest.raises(ValueError, match="missing resource: parent_reason.md"):
+        validate_prompt_resources(group)

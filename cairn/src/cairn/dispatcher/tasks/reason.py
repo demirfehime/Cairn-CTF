@@ -141,6 +141,7 @@ def run_reason_task(
             command.argv,
             phase="reason_execute",
             timeout_seconds=config.tasks.reason.timeout,
+            prompt=prompt,
             stdin_text=command.stdin_text,
             lease=lease,
             cancellation=cancellation,

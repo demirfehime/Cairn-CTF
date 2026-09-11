@@ -115,39 +115,17 @@ def test_project_workflow_create_conclude_complete_and_reopen(client: TestClient
     assert payload["intent"]["to"] == "f002"
 
 
-def test_completion_guard_blocks_intermediate_secret_while_work_remains(client: TestClient) -> None:
+def test_parent_completion_is_blocked_while_work_remains(client: TestClient) -> None:
     project_id = _create_project(client)
-    client.post(
-        f"/projects/{project_id}/intents",
-        json={"from": ["origin"], "description": "find a key", "creator": "reasoner", "worker": None},
-    )
-    client.post(
-        f"/projects/{project_id}/intents/i001/heartbeat",
-        json={"worker": "explorer"},
-    )
-    concluded = client.post(
-        f"/projects/{project_id}/intents/i001/conclude",
-        json={
-            "worker": "explorer",
-            "description": "Read flag{intermediate} from jwt_secret.key; admin_console=/admin",
-        },
-    )
-    assert concluded.status_code == 200
-    client.post(
-        f"/projects/{project_id}/intents",
-        json={"from": ["f001"], "description": "use the key", "creator": "reasoner", "worker": None},
-    )
-
-    response = client.post(
-        f"/projects/{project_id}/complete",
-        json={"from": ["f001"], "description": "found a flag-shaped key", "worker": "reasoner"},
-    )
-
+    with db.get_conn() as conn:
+        conn.execute("UPDATE projects SET kind='parent' WHERE id=?", (project_id,))
+        conn.execute("INSERT INTO facts(id,project_id,description) VALUES ('evidence',?,'intermediate result')", (project_id,))
+        conn.execute("INSERT INTO intents(id,project_id,description,creator,created_at) VALUES ('open',?,'unfinished work','test','2026-01-01')", (project_id,))
+    response = client.post(f"/projects/{project_id}/complete", json={
+        "from": ["evidence"], "description": "intermediate result", "worker": "reasoner"})
     assert response.status_code == 409
-    assert "intermediate" in response.json()["detail"]
-    detail = client.get(f"/projects/{project_id}").json()
-    assert detail["project"]["status"] == "active"
-    assert any(hint["creator"] == "dispatcher.completion_guard" for hint in detail["hints"])
+    assert "unfinished" in response.json()["detail"]
+    assert client.get(f"/projects/{project_id}").json()["project"]["status"] == "active"
 
 
 def test_stopping_project_releases_claims_and_reason_but_keeps_hints_writable(client: TestClient) -> None:
@@ -198,8 +176,8 @@ def test_settings_and_export_are_backed_by_the_same_database(client: TestClient)
     settings = client.get("/settings").json()
     assert settings["intent_timeout"] == 30
     assert settings["reason_timeout"] == 45
-    assert settings["bootstrap_task_timeout"] == 300
-    assert settings["blackboard_refresh_interval"] == 2
+    assert settings["agent_reassignment_cooldown"] == 300
+    assert settings["parent_review_debounce"] == 15
 
     exported = client.get(f"/projects/{project_id}/export?format=yaml")
     assert exported.status_code == 200
@@ -290,247 +268,78 @@ def test_project_creation_rejects_invalid_bootstrap_enabled(client: TestClient) 
     assert response.status_code == 422
 
 
-def test_agent_profiles_mask_keys_preserve_saved_key_and_drive_project_scope(client: TestClient) -> None:
-    response = client.put(
-        "/agents",
-        json={
-            "agents": [
-                {
-                    "name": "Recon",
-                    "api_base_url": "http://127.0.0.1:9001/v1/",
-                    "api_key": "secret-one",
-                    "model": "model-a",
-                    "use_penetration_prompt": True,
-                    "enabled": True,
-                    "max_running": 2,
-                    "priority": 0,
-                },
-                {
-                    "name": "Logic",
-                    "api_base_url": "http://127.0.0.1:9002/v1",
-                    "api_key": "secret-two",
-                    "model": "model-b",
-                    "use_penetration_prompt": False,
-                    "enabled": True,
-                    "max_running": 1,
-                    "priority": 1,
-                },
-            ]
-        },
-    )
+def _agent(client, name, **overrides):
+    body = dict(name=name, base_url="http://127.0.0.1:9001/v1", api_key="saved-key", model="model-a")
+    body.update(overrides)
+    response = client.post("/agents", json=body)
+    assert response.status_code == 201, response.text
+    return response.json()
 
-    assert response.status_code == 200
-    public_agents = response.json()
-    assert [agent["id"] for agent in public_agents] == ["agent_001", "agent_002"]
-    assert all(agent["has_api_key"] for agent in public_agents)
-    assert all("api_key" not in agent for agent in public_agents)
-    assert all(agent["health_status"] == "unknown" for agent in public_agents)
-    assert public_agents[0]["api_base_url"] == "http://127.0.0.1:9001/v1"
 
-    public_agents[0].update(model="model-a2", api_key="")
-    public_agents[1].update(api_key="********")
-    updated = client.put("/agents", json={"agents": public_agents})
-    assert updated.status_code == 200
-    runtime = client.get("/agents/runtime").json()
-    assert runtime[0]["api_key"] == "secret-one"
-    assert runtime[0]["model"] == "model-a2"
-    assert runtime[1]["api_key"] == "secret-two"
-
-    health = client.post(
-        f"/agents/{runtime[0]['id']}/health",
-        json={"status": "unhealthy", "detail": "HTTP 403 model unavailable"},
-    )
+def test_agent_profiles_mask_keys_preserve_saved_key_and_drive_project_scope(client):
+    parent = _agent(client, "Parent")
+    agent = _agent(client, "Recon")
+    assert agent["api_key_configured"]
+    assert "api_key" not in agent
+    update = client.put(f"/agents/{agent['id']}", json={
+        "name": "Recon", "base_url": agent["base_url"], "model": "model-b"})
+    assert update.status_code == 200
+    runtime = {row["id"]: row for row in client.get("/agents/runtime").json()}
+    assert runtime[agent["id"]]["api_key"] == "saved-key"
+    assert runtime[agent["id"]]["model"] == "model-b"
+    health = client.put(f"/agents/{agent['id']}/health", json={"status": "unhealthy", "detail": "model unavailable"})
     assert health.status_code == 200
+    assert health.json()["health_checked_at"] is not None
     assert health.json()["health_status"] == "unhealthy"
-    assert health.json()["health_detail"] == "HTTP 403 model unavailable"
-    assert health.json()["last_healthcheck_at"] is not None
-
-    project = client.post(
-        "/projects",
-        json={
-            "title": "Juice Shop",
-            "target_url": "http://127.0.0.1:3000/",
-            "agent_ids": ["agent_001", "agent_002"],
-            "origin": "authorized local target",
-            "goal": "find reproducible vulnerabilities",
-        },
-    )
-    assert project.status_code == 201
+    project = client.post("/projects", json={"title": "scoped", "origin": "authorized local target", "goal": "finish",
+        "parent_agent_id": parent["id"], "agents": [{"agent_id": agent["id"]}]})
+    assert project.status_code == 201, project.text
     meta = project.json()["project"]
-    assert meta["target_url"] == "http://127.0.0.1:3000"
-    assert meta["agent_ids"] == ["agent_001", "agent_002"]
-    exported = client.get(f"/projects/{meta['id']}/export?format=yaml").text
-    assert "target_url: http://127.0.0.1:3000" in exported
-    assert "- agent_001" in exported
-    assert "- agent_002" in exported
+    assert meta["parent_agent"]["agent_id"] == parent["id"]
+    assert [row["agent_id"] for row in meta["agents"]] == [agent["id"]]
+    exported = client.get(f"/projects/{meta['id']}/export?format=yaml")
+    assert exported.status_code == 200
+    assert agent["id"] in exported.text
+    assert "saved-key" not in exported.text
 
 
-def test_project_rejects_unknown_or_disabled_selected_agents(client: TestClient) -> None:
-    saved = client.put(
-        "/agents",
-        json={
-            "agents": [
-                {
-                    "name": "Disabled",
-                    "api_base_url": "http://127.0.0.1:9001/v1",
-                    "api_key": "secret",
-                    "model": "model-a",
-                    "enabled": False,
-                }
-            ]
-        },
-    ).json()
-
-    response = client.post(
-        "/projects",
-        json={
-            "title": "invalid agents",
-            "target_url": "http://127.0.0.1:3000",
-            "agent_ids": [saved[0]["id"], "agent_missing"],
-            "origin": "start",
-            "goal": "finish",
-        },
-    )
-
+@pytest.mark.parametrize("disabled", [True, False])
+def test_project_rejects_unknown_or_disabled_selected_agents(client, disabled):
+    parent = _agent(client, "Parent")
+    agent = _agent(client, "Disabled", enabled=False)
+    selected = agent["id"] if disabled else "agent_missing"
+    response = client.post("/projects", json={"title": "invalid", "origin": "start", "goal": "finish",
+        "parent_agent_id": parent["id"], "agents": [{"agent_id": selected}]})
     assert response.status_code == 400
-    assert "Unknown or disabled agents" in response.json()["detail"]
+    assert ("Disabled" if disabled else "Unknown") in response.json()["detail"]
 
 
-def test_model_discovery_can_reuse_saved_agent_key(client: TestClient, monkeypatch) -> None:
-    saved = client.put(
-        "/agents",
-        json={
-            "agents": [
-                {
-                    "name": "Discovery",
-                    "api_base_url": "http://127.0.0.1:9001/v1",
-                    "api_key": "saved-key",
-                    "model": "existing",
-                }
-            ]
-        },
-    ).json()[0]
-    captured: dict = {}
-
+def test_model_discovery_can_reuse_saved_agent_key(client, monkeypatch):
+    agent = _agent(client, "Discovery")
+    captured = {}
     class Response:
-        ok = True
         status_code = 200
         text = ""
-
-        @staticmethod
-        def json():
+        def json(self):
             return {"data": [{"id": "z-model"}, {"id": "a-model"}, "a-model"]}
-
     def fake_get(url, *, headers, timeout):
         captured.update(url=url, headers=headers, timeout=timeout)
         return Response()
-
     monkeypatch.setattr(agents_router.requests, "get", fake_get)
-    response = client.post(
-        "/agents/discover-models",
-        json={
-            "api_base_url": "http://127.0.0.1:9001/v1",
-            "agent_id": saved["id"],
-        },
-    )
-
-    assert response.status_code == 200
+    response = client.post("/agents/discover-models", json={"base_url": agent["base_url"], "agent_id": agent["id"]})
+    assert response.status_code == 200, response.text
     assert response.json() == {"models": ["a-model", "z-model"]}
-    assert captured == {
-        "url": "http://127.0.0.1:9001/v1/models",
-        "headers": {"Authorization": "Bearer saved-key"},
-        "timeout": 15,
-    }
+    assert captured == {"url": agent["base_url"] + "/models", "headers": {"Authorization": "Bearer saved-key", "Accept": "application/json"}, "timeout": (5, 10)}
 
 
-def test_selected_agents_are_enforced_server_side_and_legacy_bootstrap_is_removed(
-    client: TestClient,
-) -> None:
-    agents = client.put(
-        "/agents",
-        json={
-            "agents": [
-                {
-                    "name": "First",
-                    "api_base_url": "http://127.0.0.1:9001/v1",
-                    "api_key": "key-one",
-                    "model": "model-one",
-                },
-                {
-                    "name": "Second",
-                    "api_base_url": "http://127.0.0.1:9002/v1",
-                    "api_key": "key-two",
-                    "model": "model-two",
-                },
-            ]
-        },
-    ).json()
-    agent_ids = [agent["id"] for agent in agents]
-    project_id = client.post(
-        "/projects",
-        json={
-            "title": "scoped",
-            "target_url": "http://127.0.0.1:3000",
-            "agent_ids": agent_ids,
-            "origin": "start",
-            "goal": "finish",
-        },
-    ).json()["project"]["id"]
-
-    legacy_bootstrap = client.post(
-        f"/projects/{project_id}/intents",
-        json={
-            "from": ["origin"],
-            "description": "bootstrap",
-            "creator": "dispatcher.bootstrap",
-            "worker": None,
-        },
-    )
-    assert legacy_bootstrap.status_code == 403
-
-    intent = client.post(
-        f"/projects/{project_id}/intents",
-        json={
-            "from": ["origin"],
-            "description": "human path",
-            "creator": "Human",
-            "worker": None,
-        },
-    ).json()
-    assert client.post(
-        f"/projects/{project_id}/intents/{intent['id']}/heartbeat",
-        json={"worker": "local-codex"},
-    ).status_code == 403
-    assert client.post(
-        f"/projects/{project_id}/intents/{intent['id']}/heartbeat",
-        json={"worker": agent_ids[0]},
-    ).status_code == 200
-    assert client.post(
-        f"/projects/{project_id}/reason/claim",
-        json={"worker": "local-codex", "trigger": "initial"},
-    ).status_code == 403
-    assert client.post(
-        f"/projects/{project_id}/reason/claim",
-        json={"worker": agent_ids[1], "trigger": "initial"},
-    ).status_code == 200
-
-    with db.get_conn() as conn:
-        conn.execute(
-            """
-            INSERT INTO intents (
-                id, project_id, to_fact_id, description, creator, worker,
-                last_heartbeat_at, created_at, concluded_at
-            ) VALUES ('legacy-bootstrap', ?, NULL, 'bootstrap', 'dispatcher.bootstrap',
-                      'local-codex', '2026-01-01T00:00:00Z',
-                      '2026-01-01T00:00:00Z', NULL)
-            """,
-            (project_id,),
-        )
-        conn.execute(
-            "INSERT INTO intent_sources (intent_id, project_id, fact_id) "
-            "VALUES ('legacy-bootstrap', ?, 'origin')",
-            (project_id,),
-        )
-
-    detail = client.get(f"/projects/{project_id}").json()
-    assert all(intent["id"] != "legacy-bootstrap" for intent in detail["intents"])
+def test_parent_and_participant_agents_must_use_distinct_slots(client):
+    parent = _agent(client, "Parent")
+    body = {"title": "invalid", "origin": "start", "goal": "finish", "agents": [{"agent_id": parent["id"]}]}
+    assert client.post("/projects", json=body).status_code == 400
+    body["parent_agent_id"] = parent["id"]
+    assert client.post("/projects", json=body).status_code == 400
+    child = _agent(client, "Participant")
+    body["agents"] = [{"agent_id": child["id"]}]
+    result = client.post("/projects", json=body)
+    assert result.status_code == 201, result.text
+    assert result.json()["project"]["kind"] == "parent"

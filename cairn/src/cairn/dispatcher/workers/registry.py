@@ -15,12 +15,12 @@ DRIVERS: dict[str, WorkerDriver] = {
 }
 
 # Local variants invoke the host CLIs in their native configuration (no cairn provider
-# injection). claudecode and mock build identical commands in both modes, so they are shared.
+# injection unless provider settings are supplied). Mock uses the host interpreter.
 LOCAL_DRIVERS: dict[str, WorkerDriver] = {
     "claudecode": _CLAUDE,
     "codex": CodexDriver(local=True),
     "pi": PiDriver(local=True),
-    "mock": _MOCK,
+    "mock": MockDriver(local=True),
 }
 
 API_DRIVERS: dict[str, WorkerDriver] = {

@@ -115,9 +115,11 @@ def _worker_entries(project_id: str) -> list[dict[str, object]]:
     for workspace in sorted(root.iterdir()):
         if workspace.name != project_id and not workspace.name.startswith(project_id + "-"):
             continue
-        for path in sorted(workspace.glob("*/*.log"), reverse=True):
+        for path in sorted(workspace.glob("*/*"), reverse=True):
             resolved = path.resolve()
             if not _within(resolved, root.resolve()) or not resolved.is_file():
+                continue
+            if path.name not in {"stdout.log", "stderr.log", "manifest.json", "prompt.txt", "stdin.txt"}:
                 continue
             relative = path.relative_to(root).as_posix()
             entries.append(_file_entry(path=resolved, label=f"Agent {path.parent.name} / {path.name}",
@@ -243,7 +245,7 @@ def view_worker_log(project_id: str, relative_path: str):
     parts = Path(relative_path).parts
     if len(parts) != 3 or (parts[0] != project_id and not parts[0].startswith(project_id + "-")):
         raise HTTPException(404, "Unknown worker log")
-    if parts[-1] not in {"stdout.log", "stderr.log"}:
+    if parts[-1] not in {"stdout.log", "stderr.log", "manifest.json", "prompt.txt", "stdin.txt"}:
         raise HTTPException(404, "Unknown worker log")
     root = _launcher_root() / "logs" / "workers"
     return _inline_log(_log_file(root / parts[0] / parts[1], parts[2], root))

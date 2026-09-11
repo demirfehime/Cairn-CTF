@@ -48,6 +48,7 @@ def make_project(*, intents: list[Intent] | None = None) -> ProjectDetail:
     return ProjectDetail(
         project=ProjectMeta(
             id="proj_001",
+            kind="child",
             title="test",
             status="active",
             bootstrap_enabled=True,
@@ -127,7 +128,7 @@ class FakeClient:
         self.concluded.append((project_id, intent_id, worker, description))
         return ApiResult(200, {"fact": {"id": "f002"}})
 
-    def complete(self, project_id: str, from_ids: list[str], description: str, worker: str) -> ApiResult:
+    def complete(self, project_id: str, from_ids: list[str], description: str, worker: str, evidence=None) -> ApiResult:
         self.completed.append((project_id, from_ids, description, worker))
         return ApiResult(200, {})
 
@@ -169,9 +170,9 @@ class FakeDriver:
         self.execute_prompts.append(prompt)
         return DriverResult(["execute"], session=session)
 
-    def build_conclude(self, _worker, prompt: str, _session: str) -> list[str]:
+    def build_conclude(self, _worker, prompt: str, _session: str) -> DriverResult:
         self.conclude_prompts.append(prompt)
-        return ["conclude"]
+        return DriverResult(argv=["conclude"])
 
     def extract_session(self, session: str | None, _stdout: str, _stderr: str) -> str | None:
         return session

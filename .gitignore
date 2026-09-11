@@ -12,14 +12,8 @@ dispatch.yaml
 .pytest-tmp/
 *.db
 *.db-*
-
 .cairn-launcher/
-.venv/
-.pytest-tmp/
-data/
-runs/
 records/
-*.db
-*.db-*
 *.log
 node_modules/
+.pytest_cache/

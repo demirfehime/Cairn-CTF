@@ -38,6 +38,7 @@ WORKER_ENV_KEYS: dict[WorkerType, tuple[str, ...]] = {
 }
 
 DEFAULT_PROMPT_REQUIRED_TOKENS: dict[str, tuple[str, ...]] = {
+    "parent_reason.md": ("{fact_ids}", "{open_intents}", "{max_intents}"),
     "reason.md": ("{graph_yaml}", "{fact_ids}", "{open_intents}", "{max_intents}"),
     "explore.md": ("{graph_yaml}", "{intent_id}", "{intent_description}"),
     "explore_conclude.md": ("{graph_yaml}", "{intent_id}", "{intent_description}"),
@@ -47,6 +48,7 @@ DEFAULT_PROMPT_REQUIRED_TOKENS: dict[str, tuple[str, ...]] = {
 
 PROMPT_REQUIRED_TOKENS_BY_GROUP: dict[str, dict[str, tuple[str, ...]]] = {
     "mock": {
+        "parent_reason.md": ("{fact_ids}", "{open_intents}", "{max_intents}"),
         "reason.md": ("{fact_ids}", "{open_intents}", "{max_intents}"),
         "explore.md": ("{intent_id}",),
         "explore_conclude.md": ("{intent_id}",),

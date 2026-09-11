@@ -4,6 +4,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from cairn.dispatcher.config import DispatchConfig, WorkerConfig
@@ -11,6 +12,7 @@ from cairn.dispatcher.protocol.client import CairnClient
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.runtime.containers import ContainerManager
 from cairn.dispatcher.runtime.heartbeat import HeartbeatLease
+from cairn.dispatcher.runtime.execution_trace import persist_execution_trace
 from cairn.dispatcher.runtime.process import ProcessResult
 
 PROCESS_COMMUNICATE_GRACE_SECONDS = 15
@@ -90,6 +92,7 @@ def run_worker_process(
     *,
     phase: str,
     timeout_seconds: int,
+    prompt: str | None = None,
     stdin_text: str | None = None,
     lease: HeartbeatLease | None = None,
     cancellation: TaskCancellation | None = None,
@@ -110,13 +113,30 @@ def run_worker_process(
         argv,
         **process_kwargs,
     )
+    started_at = datetime.now(timezone.utc).isoformat()
     process.start()
     if lease is not None:
         lease.attach_process(process)
     if cancellation is not None:
         cancellation.attach_process(process)
     try:
-        return process.communicate(timeout=communicate_timeout(timeout_seconds))
+        result = process.communicate(timeout=communicate_timeout(timeout_seconds))
+        try:
+            persist_execution_trace(
+                trace_dir=getattr(process, "log_dir", None),
+                fallback_root=Path(".cairn-launcher/logs/traces"),
+                container_name=container_name,
+                worker_name=worker.name,
+                phase=phase,
+                argv=argv,
+                prompt=prompt,
+                stdin_text=stdin_text,
+                result=result,
+                started_at=started_at,
+            )
+        except (OSError, ValueError, TypeError):
+            LOG.warning("could not persist execution trace project=%s phase=%s", container_name, phase, exc_info=True)
+        return result
     finally:
         from cairn.extensions.trace import collect
         try:

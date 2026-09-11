@@ -78,7 +78,7 @@ class LocalProcess:
         self._process = subprocess.Popen(
             command,
             cwd=self._cwd,
-            env=self.env,
+            env={"PYTHONIOENCODING": "utf-8", **self.env},
             stdin=subprocess.PIPE if self._stdin_text is not None else None,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -157,13 +157,16 @@ class LocalProcess:
 
     def _terminate_windows_tree(self, process: subprocess.Popen[str]) -> None:
         """Terminate the worker and descendants without relying on POSIX process groups."""
-        self._run_taskkill(process.pid, force=False)
+        # Console workers have no GUI close event. Kill the complete tree directly;
+        # a non-forced taskkill can wait ten seconds without terminating it.
+        self._run_taskkill(process.pid, force=True)
         try:
             process.wait(timeout=self._term_grace)
             return
         except subprocess.TimeoutExpired:
             pass
-        self._run_taskkill(process.pid, force=True)
+        with suppress(OSError):
+            process.kill()
 
     @staticmethod
     def _run_taskkill(pid: int, *, force: bool) -> None:
@@ -175,7 +178,7 @@ class LocalProcess:
                 command,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                timeout=10,
+                timeout=FORCE_KILL_REAP_TIMEOUT_SECONDS,
                 check=False,
             )
 

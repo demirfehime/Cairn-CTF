@@ -1,5 +1,9 @@
 # Cairn Codex Development Guide
 
+## Project map
+
+Read `CAIRN_AGENT_ENTRY.md` before changing CTF runtime code.
+
 ## Default architecture
 
 - Prefer `dispatch.codex.yaml` and local execution for development on this machine.
@@ -12,7 +16,7 @@
 - Install: `.\.venv\Scripts\python.exe -m pip install -e .\cairn`
 - Test: `.\.venv\Scripts\python.exe -m pytest -q .\cairn\tests`
 - MCP/runtime: `.\.venv\Scripts\python.exe -m cairn.codex_mcp --config .\dispatch.codex.yaml --db-path .\data\cairn.db`
-- UI while the MCP runtime is active: `http://127.0.0.1:8791`
+- UI while the MCP runtime is active: `http://127.0.0.1:8792`
 
 ## Change rules
 

@@ -1,0 +1,13 @@
+.git
+.venv
+.cairn-launcher
+.pytest_cache
+.pytest-tmp
+**/__pycache__
+**/*.pyc
+data
+datas
+runs
+records
+node_modules
+dispatch.yaml

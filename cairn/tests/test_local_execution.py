@@ -333,6 +333,46 @@ def test_shipped_local_example_config_is_valid() -> None:
     assert config.local.completed_action == "keep"
 
 
+def test_shipped_codex_config_loads_server_managed_agents() -> None:
+    config = DispatchConfig.load(REPO_ROOT / "dispatch.codex.yaml")
+    assert config.runtime.execution == "local"
+    assert config.runtime.server_managed_agents
+    assert config.workers == []
+
+
+def test_windows_tree_kill_falls_back_when_taskkill_cannot_reap(monkeypatch):
+    from types import SimpleNamespace
+    calls = []
+    def wait(timeout):
+        raise subprocess.TimeoutExpired("worker", timeout)
+    process = LocalProcess(["worker"], cwd=".", env={})
+    monkeypatch.setattr(process, "_run_taskkill", lambda pid, force: calls.append((pid, force)))
+    child = SimpleNamespace(pid=123, wait=wait, kill=lambda: calls.append("kill"))
+    process._terminate_windows_tree(child)
+    assert calls == [(123, True), "kill"]
+
+
+def test_posix_termination_escalates_only_after_grace(monkeypatch):
+    from types import SimpleNamespace
+    from cairn.dispatcher.runtime import local_process as module
+    signals = []
+    def wait(timeout):
+        raise subprocess.TimeoutExpired("worker", timeout)
+    process = LocalProcess(["worker"], cwd=".", env={})
+    process._process = SimpleNamespace(pid=123, poll=lambda: None, wait=wait)
+    monkeypatch.setattr(module, "os", SimpleNamespace(name="posix"))
+    monkeypatch.setattr(module, "signal", SimpleNamespace(SIGTERM=15, SIGKILL=9))
+    monkeypatch.setattr(process, "_signal_group", lambda child, sig: signals.append(sig))
+    process._terminate()
+    assert signals == [15, 9]
+
+
+def test_codex_jsonl_response_ignores_non_object_events():
+    driver = CodexDriver(local=True)
+    output = 'null\n[]\n{"type":"item.completed","item":{"type":"agent_message","text":"answer"}}'
+    assert driver.extract_response_text(output, "") == "answer"
+
+
 # --------------------------------------------------------------------------- startup CLI check
 
 
@@ -382,7 +422,7 @@ def test_codex_local_driver_omits_provider_injection() -> None:
     assert not any("model_providers" in part for part in argv)
     assert "--model" not in argv
 
-    conclude = CodexDriver(local=True).build_conclude(worker, "PROMPT", "sess-1")
+    conclude = CodexDriver(local=True).build_conclude(worker, "PROMPT", "sess-1").argv
     exec_index = conclude.index("exec")
     resume_index = conclude.index("resume")
     assert conclude[exec_index] == "exec"
